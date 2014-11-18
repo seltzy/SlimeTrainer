@@ -1,5 +1,9 @@
-x = 10
-y = 10
+x = 25
+y = 25
+
+xGoal = 25
+yGoal = 25
+
 function love.draw()
 love.graphics.setColor(0, 150, 0);
 love.graphics.circle( "fill", x, y, 20, 20 )
@@ -11,21 +15,22 @@ function love.load()
     love.window.setMode(800, 600, {resizable=true, vsync=false, minwidth=400, minheight=300})
 end
 
-val = 0   -- establish a variable for later use
 function love.update(dt)
-	if love.mouse.isDown("r") then
-	
-	if x < love.mouse.getX() then
-    x = x + love.mouse.getX()*dt
+	if love.mouse.isDown("l") then
+		xGoal = love.mouse.getX()
+		yGoal = love.mouse.getY()
+	end
+	if x < xGoal then
+    x = x + 100*dt
 	else
-	x = x - love.mouse.getX()*dt
+	x = x - 100*dt
 	end
 	
-	if y < love.mouse.getY() then
-    y = y + love.mouse.getY()*dt
+	if y < yGoal then
+    y = y + 100*dt
 	else
-	y = y - love.mouse.getY()*dt
+	y = y - 100*dt
 	end
 	
-	end
+	
 end
