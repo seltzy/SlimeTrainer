@@ -1,6 +1,5 @@
 x = 25
 y = 25
-
 xGoal = 25
 yGoal = 25
 
@@ -20,17 +19,25 @@ function love.update(dt)
 		xGoal = love.mouse.getX()
 		yGoal = love.mouse.getY()
 	end
+	
+	ratio = math.pow(math.pow(math.abs(x - xGoal),2)+math.pow(math.abs(y - yGoal),2),.5)
+	
+	
 	if x < xGoal then
-    x = x + 100*dt
-	else
-	x = x - 100*dt
+    x = x + 100*dt*(math.abs(x - xGoal)/ratio)
+	elseif x > xGoal then
+	x = x - 100*dt*(math.abs(x - xGoal)/ratio)
 	end
-	
 	if y < yGoal then
-    y = y + 100*dt
-	else
-	y = y - 100*dt
+    y = y + 100*dt*(math.abs(y - yGoal)/ratio)
+	elseif y > yGoal then
+	y = y - 100*dt*(math.abs(y - yGoal)/ratio)
 	end
 	
-	
+	if math.abs(x - xGoal) < 2 then
+	x = xGoal
+	end
+	if math.abs(y - yGoal) < 2 then
+	y = yGoal
+	end
 end
