@@ -1,63 +1,94 @@
+--[[
+  Slime Factory
+--]]
 
 local Object = require("util.object");
 local Vector = require("util.vector");
 
 local function CopyRecur(source, dest)
 	for k, v in pairs(source) do
-		if (not dest[k]) then
-			if (type(v) == "table") then
+		if (type(v) == "table") then
+			if (not dest[k]) then
 				dest[k] = {};
 				CopyRecur(v, dest[k]);
-			else
-				dest[k] = v;
 			end
+		else
+			dest[k] = v;
 		end
 	end
+end
+
+local function TableHasValue(t, val)
+	for _, v in ipairs(t) do
+		if (val == v) then
+			return true;
+		end
+	end
+	return false;
 end
 
 local AI_MAX = 100;
 local AI_MIN = 0;
 
---[[
-  Slime Factory
---]]
 local SlimeFactoryName = "slime";
+
 local SlimeConfig = {
 	Timers = {
-		Hunger = -1,
-		Attacking = -1,
-		Eating = -1,
-		Recovery = -1
+		Mood = {},
+		Vitality = {}
 	},
-	Interaction = {
-		Attackers = {}
+	Maxima = {
+		Vitality = {
+			Health = 100,
+			Hunger = 100,
+			Rested = 100
+		}
+	},
+	-- Modifiers table holds info as to how much certain AI state variables change each second
+	Modifiers = {
+		Recovery = 1, -- additional health/sec while not resting
+		AI = {}
 	},
 	Constants = {
 		EatTime = 3, -- Time it takes to eat food in seconds
-		HungerDamageAmount = 10, -- Amount of damage to take from hunger
-		HungerDamageThreshold = 80, -- Threshold value of the Hunger state variable for hunger damage
-		FleeDamageThreshold = 80, -- Threshold value for percent health missing before fleeing
-		FleeSpeedModifier = 3
+		FleeSpeedMultiplier = 3 -- Increased speed multiplier for when fleeing an enemy.
 	},
 	Attributes = {
 		MaxHealth = 100,
 		Speed = 100, -- units moved/sec
 		Power = 10, -- dmg dealt/sec
 		Toughness = 0.0, -- %dmg mitigated
-		Metabolism = 1, -- additional hunger/sec
-		Recover = 1, -- additional health/sec
 		Size = 10, -- physical radius of the slime
 		Sight = 100 -- distance it can see in units
 	},
 	State = {
-		Health = 100, -- current hp
-		-- AI State
-		AI = {
-			-- The following are percentages, ranging from 0 to 1
-			Curiosity = 34, -- how likely it is to explore on its own (0 = completely idle, 1 = exploring whenever possible)
-			Aggression = 33, -- how likely it is to fight, give chase, or flee  (0 = completely docile, 1 = extremely irritable)
-			Hunger = 33 -- how likely it is to respond to food sources (0 = completely satisfied, 1 = starving)
+		-- Mood State - Homogenized AI State Vars
+		--[[
+			The following variables are guaranteed to stay in a quasi-homogenized state.
+			That is, they will always add up to 100. These are used to dictate the general "mood" of the AI.
+			Assume that an over abundance in one of these variables will cause an under abundance in the others.
+			This is why Health is not among these variables, even though it dictates behaviour.
+			In addition, these variables are monitored, and recorded over time for averaging.
+			This causes the AI to gravitate to the state it is in the most.
+		--]]
+		Mood = {
+			Curious = 34,
+			Angry = 33,
+			Social = 33
 		},
+		-- Vitality State - Unhomogenized AI State Vars
+		--[[
+			These do affect AI, but do not need to add up to 100, and are independent of the Mood variables.
+			These should be viewed as basic needs for the AI, and should have a drastic effect on the AI in certain cases.
+			For instance, when deciding when to fight or flee, health should always take priority to aggression.
+		--]]
+		Vitality = {
+			Health = 100,
+			Hunger = 0,
+			Rested = 100
+		},
+		Mood_Snapshots = {},
+		Mood_Avg = {},
 		-- Behaviour State
 		--[[ 
 		Valid Behaviours:
@@ -71,58 +102,166 @@ local SlimeConfig = {
 		Behaviour = "none"
 	}
 };
+
+-- Takes in AI state vars and tries its best to homogenize them to a total of 100.
+local function HomogenizeAI(aiData)
+	local aiKeys = {};
+	local curTotal = 0;
+	for k, v in pairs(aiData) do
+		curTotal = curTotal + v;
+		table.insert(aiKeys, k);
+	end
+	local newTotal = 0;
+	local aiKeysFloating = {};
+	for i, k in pairs(aiKeys) do
+		aiData[k] = (100 * aiData[k]) / curTotal;
+		if (tonumber(tostring(aiData[k])) ~= tonumber(tostring(math.floor(aiData[k])))) then
+			table.insert(aiKeysFloating, k);
+		end
+		aiData[k] = math.floor(aiData[k]);
+		newTotal = newTotal + aiData[k];
+	end
+	local divvy = 100 - newTotal;
+	while (divvy > 0) do
+		for i, k in pairs(aiKeysFloating) do
+			if (divvy == 0) then
+				break;
+			end
+			divvy = divvy - 1;
+			aiData[k] = aiData[k] + 1;
+		end
+	end
+end
 	
 -- Start Slime Metatable
 local MSlime = {};
 MSlime.__index = MSlime;
 MSlime.Type = SlimeFactoryName;
 
+-- List of valid behaviours in order of priority.
+MSlime.BehaviourOrder = {"flee", "fight", "eat", "rest", "explore", "use", "none"};
+--MSlime.BehaviourThreshold = {};
+
+-- List of functions that calculate desire for a particular behaviour - indexed by behaviour name.
 MSlime.Desire = {
 	flee = function(slime)
-		local hpLeft = slime:GetHealth() / slime:GetMaxHealth();
-		local aggro = slime.State.AI.Aggression / 100;
-		--local behav = slime:GetBehaviour();
-		local target = slime:GetClosestEnemy();
-		if (not target) then
+		-- If we're too tired, it's sleep time.
+		local rested = slime:GetVitalityPercent("Rested");
+		if (rested < 0.10) then
 			return 0, nil;
 		end
+		
+		local behav = slime:GetBehaviour();
+		local aggro = slime:GetMoodPercent("Angry");
+		
+		-- Calculate distance needed to be "safe"
+		local dist = slime.Attributes.Sight;
+		if (behav == "flee") then
+			dist = dist * 1.5 + (1 - aggro); -- Only flee beyond your sight radius if you've already decided to flee.
+		end
+		local target = slime:GetClosestAttacker(dist);
+		
+		-- If nothing has attacked us yet, don't flee.
+		if (behav ~= "flee" and (not target or slime:GetPos():distance(target:GetPos()) > slime.Attributes.Size + target.Attributes.Size)) then
+			return 0, nil;
+		end
+		-- If nothing is currently attacking/chasing us, don't flee.
+		if (not target or target:GetBehaviour() ~= "fight" or not target:GetTarget() or target:GetTarget() ~= slime or target:GetVitality("Health") <= 0) then
+			return 0, nil;
+		end
+		
+		-- Desire to flee relates to remaining HP and aggression.
+		local hpLeft = slime:GetVitalityPercent("Health");
 		return 1 - (hpLeft * aggro), target;
 	end,
 	fight = function(slime)
-		local hpLeft = slime:GetHealth() / slime:GetMaxHealth();
-		local aggro = slime.State.AI.Aggression / 100;
-		local target = slime:GetClosestEnemy(slime.Attributes.Sight * 0.75);
-		if (not target) then
+		local behav = slime:GetBehaviour();
+		local hpLeft = slime:GetVitalityPercent("Health");
+		local aggro = slime:GetMoodPercent("Angry");
+		-- Calculate distance needed to give chase.
+		local dist = slime.Attributes.Sight;
+		if (behav ~= "fight") then
+			dist = dist * aggro; --(math.min(math.max(0, aggro + 0.1), 1));
+		end
+		local target = slime:GetClosestSlime(dist);
+		if (not target or target:GetVitality("Health") <= 0) then
 			return 0, nil;
 		end
 		return (hpLeft * aggro), target;
 	end,
 	eat = function(slime)
-		local hunger = slime.State.AI.Hunger / 100;
+		local hunger = slime:GetVitalityPercent("Hunger");
 		local target = slime:GetClosestFood();
-		if (not target or hunger < .1) then
+		if (not target --[[or hunger < .1]]) then
 			return 0, nil;
 		end
 		return hunger, target;
 	end,
 	explore = function(slime)
-		local curious = slime.State.AI.Curiosity / 100;
-		local hunger = slime.State.AI.Hunger / 100;
-		local target = slime:GetPos() + Vector.Random(slime.Attributes.Sight);
-		while (target.x < 0 or target.x > love.graphics.getWidth() or target.y < 0 or target.y > love.graphics.getHeight()) do
-			target = slime:GetPos() + Vector.Random(slime.Attributes.Sight);
+		local behav = slime:GetBehaviour();
+		local target = slime:GetTarget();
+		
+		-- If we're too tired, it's sleep time.
+		local rested = slime:GetVitalityPercent("Rested");
+		if (behav == "rest" and slime:GetVitalityPercent(target[1]) < target[2]) then
+			return 0, nil;
 		end
+		
+		--[[if (behav == "explore" and rested < 0.20) then
+			return 0, nil;
+		end]]
+		
+		-- Don't explore if we're already eating.
+		if (behav == "eat" and slime:GetTarget() and slime:GetTarget():GetEater() == slime) then
+			return 0, nil;
+		end
+		
+		-- Calculate curiosity and hunger - we will take the max of the two.
+		local hunger = slime:GetVitalityPercent("Hunger");
+		local curious = slime:GetMoodPercent("Curious");
+		
+		-- If hunger is really low, don't even pay attention to it?
 		if (hunger < .1) then
 			hunger = 0;
 		end
+		
+		-- Pick a random place to go to.
+		local target = slime:GetPos() + Vector.Random(slime.Attributes.Sight);
+		-- Don't go off the screen for now.
+		while (target.x < 0 or target.x > love.graphics.getWidth() or target.y < 0 or target.y > love.graphics.getHeight()) do
+			target = slime:GetPos() + Vector.Random(slime.Attributes.Sight);
+		end
+		
 		return math.max(curious, hunger), target;
 	end,
 	rest = function(slime)
-		local hpLeft = slime:GetHealth() / slime:GetMaxHealth();
-		return 1 - hpLeft, (math.random(75, 100) / 100);
+		local behav = slime:GetBehaviour();
+		local target = slime:GetTarget();
+		if (behav == "rest" and slime:GetVitalityPercent(target[1]) < target[2]) then
+			return 1, target;
+		end
+		-- Don't rest if we're currently eating.
+		if (behav == "eat" and slime:GetTarget() and slime:GetTarget():GetEater() == slime) then
+			return 0, nil;
+		end
+		
+		local rested = slime:GetVitalityPercent("Rested");
+		if (rested > 0.50) then
+			return 0, nil;
+		end
+		
+		local hpLeft = 1; --slime:GetVitalityPercent("Health");
+		local targetVit = "Rested";
+		--[[if (rested > hpLeft) then
+			targetVit = "Rested";
+		else
+			targetVit = "Health";
+		end]]
+		local targetPercent = (math.random(80, 100) / 100);
+		return math.max(1 - rested, 1 - hpLeft), {targetVit, targetPercent};
 	end,
 	use = function(slime)
-		local curious = slime.State.AI.Curiosity / 100;
+		local curious = slime:GetMoodPercent("Curious");
 		local target = slime:GetClosestObjective();
 		if (not target) then
 			return 0, nil;
@@ -130,14 +269,25 @@ MSlime.Desire = {
 		return curious, target;
 	end,
 	none = function(slime)
-		return 1, nil;
+		return 0, nil;
 	end
 };
-MSlime.BehaviourOrder = {"flee", "fight", "eat", "rest", "explore", "use", "none"};
 
+-- Filter list of elements using filterMeFunc - if filterMeFunc returns true, the value will not appear in the returned table.
+local function FilterList(list, filterMeFunc)
+	local t = {};
+	for i = 1, #list do
+		if (not filterMeFunc(list[i])) then
+			table.insert(t, list[i]);
+		end
+	end
+	return t;
+end
+
+-- Returns a list of the closest objects from objList in relation to obj.
 local function GetClosest(obj, objList)
 	local t = {};
-	local closest = 99999;
+	local closest = math.huge; -- Change to MAXINT
 	for _, obj in pairs(objList) do
 		local dist = obj:GetPos():distance(obj:GetPos());
 		if (dist < closest) then
@@ -150,53 +300,68 @@ local function GetClosest(obj, objList)
 	return t;
 end
 
-local function FilterTargets(targets, func)
-	local t = {};
-	for _, obj in pairs(targets) do
-		if (not func(obj)) then
-			table.insert(t, obj);
-		end
-	end
-	return t;
-end
-
+-- Finds all objects of the named type within the specified radius.
 function MSlime:FindInImmediateArea(typeName, radius)
-	local t = {};
+	local t = Object.GetAll();
 	if (not radius) then
 		radius = self.Attributes.Sight;
 	end
-	for _, obj in pairs(Object.GetAll()) do
-		if (obj ~= self and obj:GetType() == typeName and self:GetPos():distance(obj:GetPos()) <= radius) then
-			table.insert(t, obj);
-		end
-	end
+	t = FilterList(t, function(obj)
+		return (obj == self or obj:GetType() ~= typeName or self:GetPos():distance(obj:GetPos()) > radius);
+	end);
 	return t;
 end
+
+-- Helper function for finding food.
 function MSlime:GetClosestFood(radius)
 	local objs = self:FindInImmediateArea("food", radius);
-	objs = FilterTargets(objs, function(obj) if (obj.Eater and obj.Eater:GetBehaviour() ~= "eat") then obj.Eater = nil; end return obj.Eater; end);
+	-- Filter foods that are currently being eaten.
+	objs = FilterList(objs, function(obj)
+								local eater = obj:GetEater();
+								return (eater and eater ~= self);
+							end);
+	-- Get the closest one.
 	objs = GetClosest(self, objs);
+	-- If more than one is closest, choose a random one.
 	if (#objs > 0) then
-		-- go eat the food
 		return objs[math.random(1, #objs)];
 	else
 		return nil;
 	end
 end
-function MSlime:GetClosestEnemy(radius)
+
+-- Helper function for finding enemies.
+function MSlime:GetClosestSlime(radius)
 	local objs = self:FindInImmediateArea("slime", radius);
-	--objs = FilterTargets(objs, function(obj) return obj.IsEnemy == self.IsEnemy; end);
+	-- Get the closest one.
 	objs = GetClosest(self, objs);
+	-- If more than one is closest, choose a random one.
 	if (#objs > 0) then
-		-- go eat the food
 		return objs[math.random(1, #objs)];
 	else
 		return nil;
 	end
 end
+function MSlime:GetClosestAttacker(radius)
+	local objs = self:FindInImmediateArea("slime", radius);
+	-- Filter enemies that are not attacking.
+	objs = FilterList(objs, function(obj) 
+									return (obj:GetBehaviour() == "attack" and obj:GetTarget() == self);
+								end);
+	-- Get the closest one.
+	objs = GetClosest(self, objs);
+	-- If more than one is closest, choose a random one.
+	if (#objs > 0) then
+		return objs[math.random(1, #objs)];
+	else
+		return nil;
+	end
+end
+
+-- TODO
 function MSlime:GetClosestObjective(radius)
 	local objs = self:FindInImmediateArea("objective", radius);
-	objs = FilterTargets(objs, function(obj) return obj.IsEnemy ~= self.IsEnemy; end);
+	objs = FilterList(objs, function(obj) return obj.IsEnemy ~= self.IsEnemy; end);
 	objs = GetClosest(self, objs);
 	if (#objs > 0) then
 		-- go eat the food
@@ -206,66 +371,82 @@ function MSlime:GetClosestObjective(radius)
 	end
 end
 
+-- Calculates desire for each behaviour using the Desire function table, and returns list of desire values.
 function MSlime:CalculateDesire()
 	local curDesire = {};
 	for i, b in pairs(self.BehaviourOrder) do
 		local desire, target = self.Desire[b](self);
 		--print("Calculated " .. b .. " desire:\t", desire, target);
-		if (not desire or desire < 0) then
-			desire = 0;
+		if (desire and desire > 0) then
+			curDesire[b] = {desire, target};
 		end
-		curDesire[b] = {desire, target};
 	end
 	return curDesire;
 end
 
+-- Returns the most desired behaviour, and a relevant target if applicable
 function MSlime:GetDisiredBehaviour()
+	-- First calculate the desire for all behaviours.
 	local desireVars = self:CalculateDesire();
-	for i, b in pairs(self.BehaviourOrder) do
-		local nextBehaviour = self.BehaviourOrder[i+1];
-		local desire, target = unpack(desireVars[b]);
-		--print("Comparing " .. b .. " desire:\t", unpack(desireVars[b]));
-		if (not nextBehaviour or (desire > 0 and desire >= desireVars[nextBehaviour][1])) then
-			return b, target;
+	local behav, desire, target = "none", 0, nil;
+	
+	-- Go through behaviours in order of priority.
+	for i, thisBehaviour in pairs(self.BehaviourOrder) do
+		if (desireVars[thisBehaviour]) then
+			-- Grab the desire level and corresponding target for this behaviour.
+			local thisDesire, thisTarget = unpack(desireVars[thisBehaviour]);
+			
+			-- Grab the next behaviour name for comparison.
+			local nextBehaviour = self.BehaviourOrder[i+1];
+			
+			-- Print some debug info
+			local str = "Comparing " .. thisBehaviour .. " desire:\t[" .. tostring(desireVars[thisBehaviour][1]) .. ", " .. tostring(desireVars[thisBehaviour][2]) .. "]";
+			if (desireVars[nextBehaviour]) then
+				str = str .. " to [" .. tostring(desireVars[nextBehaviour][1]) .. ", " .. tostring(desireVars[nextBehaviour][2]) .. "]";
+			end
+			print(str);
+			
+			-- If we've reached the end of the list, or the desire of this behaviour exceeds the next one.
+			if (not nextBehaviour or not desireVars[nextBehaviour] or (thisDesire > 0 and thisDesire >= desireVars[nextBehaviour][1])) then
+				behav = thisBehaviour
+				desire = thisDesire;
+				target = thisTarget;
+				break;
+			end
 		end
 	end
-	return "none", nil;
+	print("Most desired behaviour = {" .. behav .. ", " .. tostring(target) .. "} @ " .. desire);
+	return behav, target;
 end
 
 function MSlime:SelectBestBehaviour()
 	local behav, target = self:GetDisiredBehaviour();
+	-- If we're changing the behaviour, nullify the current target.
 	if (behav ~= self:GetBehaviour()) then
 		self:SetTarget(nil);
 	end
 	if (behav == "flee") then
+		-- If we're fleeing, update the target.
 		self:SetTarget(target);
-	elseif (behav == "fight") then
-		if (not self:GetTarget()) then
-			self:SetTarget(target);
-		end
-	elseif (behav == "eat") then
-		if (not self:GetTarget()) then
-			self:SetTarget(target);
-		end
-	elseif (behav == "rest") then
+	elseif (behav == "fight" or behav == "eat" or behav == "use" or behav == "rest") then
+		-- If we're fighting, eating, or using, prioritize current target before changing it.
 		if (not self:GetTarget()) then
 			self:SetTarget(target);
 		end
 	elseif (behav == "explore") then
+		-- Don't update target until we've reached our current one.
 		if (not self:GetTarget() or self:GetPos():distance(self:GetTargetPos()) == 0) then
 			self:SetTarget(target);
 		end
-	elseif (behav == "use") then
-		if (not self:GetTarget()) then
-			self:SetTarget(self:GetClosestObjective());
-		end
 	else
+		-- Invalid behaviour, or none - no target.
 		self:SetTarget(nil);
 	end
 	self.State.Behaviour = behav;
+	print("Set behaviour = {" .. self.State.Behaviour .. ", " .. tostring(self:GetTarget()) .. "}");
 end
 
--- Accessors for current target (used by AI)
+-- Target accessors
 function MSlime:SetTarget(target)
 	self.CurrentTarget = target;
 end
@@ -284,23 +465,68 @@ function MSlime:GetTargetPos()
 	end
 	return targetPos;
 end
-function MSlime:GetHealth()
-	return self.State.Health;
-end
-function MSlime:GetMaxHealth()
-	return self.Attributes.MaxHealth;
-end
+
+-- Behaviour accessors
 function MSlime:GetBehaviour()
 	return self.State.Behaviour;
 end
+function MSlime:SetBehaviour(behav)
+	if (not TableHasValue(t, behav)) then
+		error("Attempt to set invalid behaviour (" .. behav .. ")!", 2);
+	end
+	self.State.Behaviour = behav;
+end
 
--- Take damage
+
+-- Vitality accessors
+function MSlime:GetVitality(vitKey)
+	return self.State.Vitality[vitKey];
+end
+function MSlime:GetVitalityPercent(vitKey)
+	return self.State.Vitality[vitKey] / self.Maxima.Vitality[vitKey];
+end
+function MSlime:SetVitality(vitKey, val)
+	val = math.ceil(val); -- Round up
+	if (val < 0) then
+		val = 0;
+	elseif (val > self.Maxima.Vitality[vitKey]) then -- TODO: change this to some variable (like max health)
+		val = self.Maxima.Vitality[vitKey];
+	end
+	self.State.Vitality[vitKey] = val;
+end
+function MSlime:ModifyVitality(vitKey, amount)
+	self:SetVitality(vitKey, self:GetVitality(vitKey) + amount);
+end
+
+-- Mood Accessors
+function MSlime:GetMood(aiKey)
+	return self.State.Mood[aiKey];
+end
+function MSlime:GetMoodPercent(aiKey)
+	return self.State.Mood[aiKey] / AI_MAX;
+end
+function MSlime:SetMood(aiKey, aiVal)
+	aiVal = math.floor(aiVal); -- Round down
+	--[[local total = 0;
+	for k, v in pairs(self.State.Mood) do
+		if (k ~= aiKey) then
+			total = total + v;
+		end
+	end
+	total = total + aiVal;
+	if (total ~= 100) then
+		error("Attempt to modify homogenized set to invalid value", 2);
+	end]]
+	self.State.Mood[aiKey] = aiVal;
+end
+
+-- Take damage (damage can be an object, or a number.
 function MSlime:TakeDamage(damage)
 	local amount;
 	if (damage == self) then
 		-- if the damage source is itself, it takes hunger damage.
 		amount = self.Constants.HungerDamageAmount;
-	elseif (type(damage) == "table" and damage:GetType() == "slime") then
+	elseif (type(damage) == "table" and Object.IsValid(damage) and damage:GetType() == "slime") then
 		-- if the damage source is an enemy slime, it takes power damage.
 		amount = damage.Attributes.Power;
 	elseif (type(damage) == "number" and damage > 0) then
@@ -313,69 +539,60 @@ function MSlime:TakeDamage(damage)
 	-- Mitigate damage from external sources
 	if (damage ~= self) then
 		amount = amount - amount * self.Attributes.Toughness;
+		print("Mitigating " .. (amount * self.Attributes.Toughness) .. " damage");
 	end
 	-- Update health
-	self.State.Health = self.State.Health - amount;
-	if (self.State.Health < 0) then
-		self.State.Health = 0;
+	print("Updating health to " .. self.State.Vitality.Health .. " - " .. amount .. " = " .. (self.State.Vitality.Health - amount));
+	self.State.Vitality.Health = self.State.Vitality.Health - amount;
+	if (self.State.Vitality.Health < 0) then
+		self.State.Vitality.Health = 0;
 		-- I'm gonna die!
 	end
 end
 
--- Increases hunger depending on metabolism - a multiplier may be provided to increase metabolism (def: 1)
-function MSlime:UpdateHunger(modifier)
-	if (not self.Timers.Hunger or self.Timers.Hunger < 0) then
-		self.Timers.Hunger = love.timer.getTime();
+function MSlime:UpdateMood(moodKey, amount)
+	-- If there's no valid timer for updating this value, set the reference time to now.
+	if (not self.Timers.Mood[moodKey] or self.Timers.Mood[moodKey] <= 0) then
+		self.Timers.Mood[moodKey] = love.timer.getTime();
 	end
-	if (love.timer.getTime() - self.Timers.Hunger < 1) then
-		--print("Hunger timer: " .. love.timer.getTime() .. " - " .. self.State.AI.Hunger .. " = " .. (love.timer.getTime() - self.Timers.Hunger));
+	-- If less than 1 second has passed, don't update.
+	if (love.timer.getTime() - self.Timers.Mood[moodKey] < 1) then
 		return;
 	end
-	
-	-- Calculate new hunger
-	if (not modifier) then
-		modifier = 1;
-	end
-	local amount = (self.Attributes.Metabolism * modifier);
-	self:ModifyAI("Hunger", amount);
-	self.Timers.Hunger = love.timer.getTime();
-	
-	--print("Updating hunger on [" .. tostring(self) .. "] to " .. self.State.AI.Hunger);
-	
-	-- Take damage if we exceed max hunger
-	if (self.State.AI.Hunger > self.Constants.HungerDamageThreshold) then
-		--print("Taking hunger damage...");
-		self:TakeDamage(self.Constants.HungerDamageAmount, self); 
-	end
+	-- Calculate adjusted amount based on average mood over time.
+	local delta = math.floor(self.State.Mood_Avg[moodKey] - self.State.Mood[moodKey]);
+	amount = amount + delta;
+	-- Modify by the amount given.
+	self:ModifyMood(moodKey, amount);
+	-- Reset the timer.
+	self.Timers.Mood[moodKey] = nil;
 end
 
--- Increases hunger depending on metabolism - a multiplier may be provided to increase metabolism (def: 1)
-function MSlime:UpdateHealth(modifier)
-	if (not self.Timers.Recovery or self.Timers.Recovery < 0) then
-		self.Timers.Recovery = love.timer.getTime();
+function MSlime:UpdateVitality(vitKey, amount)
+	-- If there's no valid timer for updating this value, set the reference time to now.
+	if (not self.Timers.Vitality[vitKey] or self.Timers.Vitality[vitKey] <= 0) then
+		self.Timers.Vitality[vitKey] = love.timer.getTime();
 	end
-	if (love.timer.getTime() - self.Timers.Recovery < 1) then
+	-- If less than 1 second has passed, don't update.
+	if (love.timer.getTime() - self.Timers.Vitality[vitKey] < 1) then
 		return;
 	end
-	
-	-- Calculate new hunger
-	if (not modifier) then
-		modifier = 1;
-	end
-	local amount = (self.Attributes.Recover * modifier);
-	self.State.Health = self:GetHealth() + amount
-	if (self:GetHealth() > self:GetMaxHealth()) then
-		self.State.Health = self:GetMaxHealth();
-	end
-	
-	self.Timers.Recovery = love.timer.getTime();
+	-- Modify by the amount given.
+	self:ModifyVitality(vitKey, amount);
+	-- Reset the timer.
+	self.Timers.Vitality[vitKey] = nil;
 end
 
+-- Deletes the food object and modifies state accordingly.
 function MSlime:Eat(food)
 	-- Calculate new hunger
 	local amount = food.Satisfaction;
-	self:ModifyAI("Hunger", -amount);
+	-- Delete the food object
 	Object.Delete(food);
+	
+	-- Modify vitality state.
+	self:ModifyVitality("Hunger", -amount);
+	self:ModifyVitality("Health", amount * 0.5);
 	-- Make it fat if we exceed min hunger?
 end
 
@@ -409,7 +626,7 @@ function MSlime:MoveAway(targetPos, dt)
 	local forward = (targetPos - self:GetPos()):normalize();
 	local right = Vector(forward.y, forward.x);
 	local direction = (forward + (right * (math.random(-100, 100) / 100)):normalize()):normalize();
-	local offset = -(direction * self.Attributes.Speed * self.Constants.FleeSpeedModifier * dt);
+	local offset = -(direction * self.Attributes.Speed * self.Constants.FleeSpeedMultiplier * dt);
 	local newPos = self:GetPos() + offset;
 	if (newPos.x < 0 or newPos.x > love.graphics.getWidth()) then
 		newPos = self:GetPos() + Vector(-offset.x, 0);
@@ -504,9 +721,9 @@ local function GetCausedChange(keysToChange, aiData, amount)
 end
 
 -- This is kind of complicated, but basically, this keeps AI variables at a unit value.
-function MSlime:ModifyAI(aiKey, amount)
+function MSlime:ModifyMood(aiKey, amount)
 	-- If the proposed key is invalid, do nothing.
-	if (not self.State.AI[aiKey]) then
+	if (not self:GetMood(aiKey)) then
 		return false;
 	end
 	
@@ -527,7 +744,7 @@ function MSlime:ModifyAI(aiKey, amount)
 	end
 
 	-- Calculate the new value without correction.
-	local newValue = self.State.AI[aiKey] + amount;
+	local newValue = self:GetMood(aiKey) + amount;
 
 	-- Calculate correction.
 	if (newValue < AI_MIN) then
@@ -544,24 +761,22 @@ function MSlime:ModifyAI(aiKey, amount)
 	end
 
 	-- Calculate the new value.
-	self.State.AI[aiKey] = self.State.AI[aiKey] + amount;
-	--print("Updating " .. aiKey .. " to change by " .. amount .. ", becoming " .. self.State.AI[aiKey]);
+	self:SetMood(aiKey, self:GetMood(aiKey) + amount);
+	--print("Updating " .. aiKey .. " to change by " .. amount .. ", becoming " .. self.State.Mood[aiKey]);
 
 	-- Figure out which keys also need to change as a result.
-	local keysToChange = GetAffectedKeys(aiKey, self.State.AI, amount);
+	local keysToChange = GetAffectedKeys(aiKey, self.State.Mood, amount);
 
 	-- Update the keys that need to be changed.
 	--print("Changing " .. #keysToChange .. " keys [" .. table.concat(keysToChange, ", ") .. "]");
 
-	local change = GetCausedChange(keysToChange, self.State.AI, amount);
+	local change = GetCausedChange(keysToChange, self.State.Mood, amount);
 	repeat
 		local leftOverChange = 0;
 		for _, ai in pairs(keysToChange) do
 			local causedChange = change[ai];
 			--print("Calculated caused change for " .. ai .. " to be " .. causedChange);
-			local percent = self.State.AI[ai];
-			--print("Adjusting affected key " .. ai .. " currently at " .. percent);
-			local causedValue = self.State.AI[ai] + causedChange;
+			local causedValue = self:GetMood(ai) + causedChange;
 			--print("Attempting to have " .. ai .. " to change by " .. causedChange .. ", which would make it " .. causedValue);
 			if (causedValue < AI_MIN) then
 				leftOverChange = leftOverChange - (causedValue);
@@ -572,37 +787,62 @@ function MSlime:ModifyAI(aiKey, amount)
 				causedValue = AI_MAX;
 				--print("Change of " .. causedChange .. " in " .. ai .. " would give " .. causedValue .. " - correcting to " .. causedValue .. " - leftover becomes " .. leftOverChange);
 			end
-			--print("Caused " .. ai .. " to change by " .. (causedValue - self.State.AI[ai]) .. ", becoming " .. causedValue);
-			self.State.AI[ai] = causedValue;
+			--print("Caused " .. ai .. " to change by " .. (causedValue - self.State.Mood[ai]) .. ", becoming " .. causedValue);
+			self:SetMood(ai, causedValue);
 		end
 		if (leftOverChange ~= 0) then
 			--print("Leftover change of " .. leftOverChange .. " was found!");
-			keysToChange = GetAffectedKeys(aiKey, self.State.AI, leftOverChange);
+			keysToChange = GetAffectedKeys(aiKey, self.State.Mood, leftOverChange);
 			--print("Need to adjust " .. #keysToChange .. " keys [" .. table.concat(keysToChange, ", ") .. "]");
-			change = GetCausedChange(keysToChange, self.State.AI, leftOverChange);
+			change = GetCausedChange(keysToChange, self.State.Mood, leftOverChange);
 		end
 	until (leftOverChange == 0);
 
 	-- Calculate the total to see if there was an error in calculation.
 	local total = 0;
-	for k, v in pairs(self.State.AI) do
+	for k, v in pairs(self.State.Mood) do
 		total = total + v;
 	end
-	if (total > AI_MAX or total < AI_MIN) then
+	if (total ~= AI_MAX) then
 		--print("Math error on [" .. tostring(self) .. "]!");
-		--for k, v in pairs(self.State.AI) do
+		--for k, v in pairs(self.State.Mood) do
 			--print(k, v);
 		--end
-		error("Unable to keep AI data unit-sized - it became " .. total, 2);
+		error("Unable to keep AI data homogenized - it became " .. total, 2);
 	end
 
 	return total == AI_MAX;
 end
 
+-- Takes a snapshot of the AI state to figure out what kind of AI config it should gravitate to.
+function MSlime:TakeSnapshot()
+	local snapshot = {};
+	for k, v in pairs(self.State.Mood) do
+		snapshot[k] = v;
+	end
+	table.insert(self.State.Mood_Snapshots, snapshot);
+	if (#self.State.Mood_Snapshots > 10) then
+		table.remove(self.State.Mood_Snapshots, 1);
+	end
+	local avg = {};
+	for i, t in ipairs(self.State.Mood_Snapshots) do
+		for k, v in pairs(t) do
+			if (not avg[k]) then
+				avg[k] = 0;
+			end
+			avg[k] = avg[k] + v;
+		end
+	end
+	for k, v in pairs(avg) do
+		avg[k] = avg[k] / #self.State.Mood_Snapshots;
+	end
+	self.State.Mood_Avg = avg;
+end
+
 -- The Update function
 function MSlime:Update(dt)
 	
-	if (self.State.Health == 0) then
+	if (self.State.Vitality.Health == 0) then
 		-- Kill me!
 		Object.Delete(self);
 		return;
@@ -617,21 +857,81 @@ function MSlime:Update(dt)
 	local sightDistSqr = math.pow(self.Attributes.Sight, 2);
 	local distToTargetSqr = self:GetPos():distanceSqr(targetPos);
 	
-	local behav = self.State.Behaviour;
+	local behav = self:GetBehaviour();
 	--print("Current behaviour = " .. behav .. " -- target = " .. tostring(target) .. " -- target pos = " .. tostring(targetPos));
 	
-	if (behav ~= "rest") then
-		-- Update hunger
-		self:UpdateHunger();
-		self:UpdateHealth();
+	-- Take snapshot every so often
+	if (not self.Timers.Snapshot or self.Timers.Snapshot < 0) then
+		self.Timers.Snapshot = love.timer.getTime();
+	end
+	if (love.timer.getTime() - self.Timers.Snapshot >= 3) then
+		self:TakeSnapshot();
+		self.Timers.Snapshot = nil;
 	end
 	
-	if (behav == "none") then
-		return;
+	-- Speed up the process for testing - 1 for normal.
+	local testMul = 1;
+	
+	-- Vitality modifiers
+	local healthMod = 1;
+	local hungerMod = 1;
+	local restedMod = -1;
+	
+	-- Mood modifiers
+	local curiousMod = 0;
+	local angryMod = 0;
+	local socialMod = 0;
+	
+	-- Modify vitality based on behaviour.
+	
+	-- Behaviours that don't require moving cause better health regeneration. Fighting/Fleeing causes no regeneration.
+	if (behav == "none" or behav == "rest" or behav == "eat" or behav == "use") then
+		healthMod = 2;
+	elseif (behav == "flee" or behav == "fight") then
+		healthMod = 0;
+	end
+	
+	-- When hunger is too high, and we don't see any food, take hunger damage.
+	if (behav ~= "eat" and self:GetVitalityPercent("Hunger") > 0.90) then
+		healthMod = -1; -- Hunger Damage amount
+	end
+	
+	-- Don't increase hunger when eating.
+	if (behav == "eat" and self:GetTarget() and self:GetTarget():GetEater() and self:GetTarget():GetEater() == self) then
+		hungerMod = 0;
+	end
+	
+	if (behav == "flee") then
+		restedMod = -2;
+	elseif (behav == "fight") then
+		restedMod = -2;
+	elseif (behav == "explore") then
+		restedMod = -1;
+	elseif (behav == "eat" or behav == "use") then
+		restedMod = 0;
 	elseif (behav == "rest") then
-		--if (self:GetHealth() < self:GetMaxHealth() * self:GetTarget()) then
-			self:UpdateHealth(10);
-		--end
+		restedMod = 1;
+	end
+	
+	-- Modify mood based on behaviour.
+	
+	-- Prolonged exposure to violence adds to aggression. Time away reduces it.
+	if (behav == "flee" or behav == "fight") then
+		angryMod = 1; -- Add to aggression
+	else
+		angryMod = -1; -- Subtract from aggression
+	end
+	
+	-- Prolonged exploratory behaviours adds to curiosity. Time away reduces it.
+	if (behav == "explore" or behav == "use") then
+		curiousMod = 1;
+	else
+		curiousMod = -1;
+	end
+	
+	-- Do things based on behaviour
+	if (behav == "none") then
+		--return;
 	elseif (behav == "use") then
 		--self:Use(target);
 	elseif (behav == "explore") then
@@ -641,16 +941,16 @@ function MSlime:Update(dt)
 			-- Move to the food until we reach it.
 			self:MoveToward(targetPos, dt);
 		else
-			-- Eat the food.
-			if (self.Timers.Eating < 0) then
+			-- Eat the food when we get to it.
+			target:SetEater(self);
+			if (not self.Timers.Eating or self.Timers.Eating < 0) then
 				self.Timers.Eating = love.timer.getTime();
-				target.Eater = self;
 			end
 			local timeSpentEating = love.timer.getTime() - self.Timers.Eating;
 			if (timeSpentEating >= self.Constants.EatTime) then
 				self:Eat(target);
 				self:SetTarget(nil);
-				self.Timers.Eating = -1;
+				self.Timers.Eating = nil;
 			end
 		end
 	elseif (behav == "fight") then
@@ -665,24 +965,28 @@ function MSlime:Update(dt)
 			local timeSinceAttack = love.timer.getTime() - self.Timers.Attacking;
 			if (timeSinceAttack >= 1) then
 				target:TakeDamage(self);
-				self.Timers.Attacking = love.timer.getTime();
+				self.Timers.Attacking = nil;
 			end
-			-- If the enemy dies...
-			--if (target.State.Health <= 0) then
-			--	self:SetTarget(nil);
-			--end
 		end
 	elseif (behav == "flee") then
 		self:MoveAway(targetPos, dt);
 	end
+	
+	self:UpdateVitality("Health", healthMod); -- Heal over time, or take hunger damage.
+	self:UpdateVitality("Hunger", hungerMod * testMul);
+	self:UpdateVitality("Rested", restedMod * testMul);
+	
+	self:UpdateMood("Curious", curiousMod);
+	self:UpdateMood("Angry", angryMod);
+	self:UpdateMood("Social", socialMod);
 end
 
 -- The Draw function
 function MSlime:Draw()
-	local hpMod = (self.State.Health / self.Attributes.MaxHealth);
-	local red = self.State.AI.Aggression * 2 + 55;
-	local green = self.State.AI.Hunger * 2 + 55;
-	local blue = self.State.AI.Curiosity * 2 + 55;
+	local hpMod = self:GetVitalityPercent("Health");
+	local red = self:GetMood("Angry") * 2 + 55;
+	local green = self:GetMood("Social") * 2 + 55;
+	local blue = self:GetMood("Curious") * 2 + 55;
 	love.graphics.setColor(red, green, blue);
 	
 	-- Draw slime
@@ -708,13 +1012,21 @@ function MSlime:Draw()
 	love.graphics.rectangle("fill", self:GetPos().x + self.Attributes.Size * 0.75 + 1, self:GetPos().y - 15 + 1, (18 * hpMod), 8);
 	
 	love.graphics.setColor(255, 255, 255);
-	-- Draw AI data:
+	-- Draw Debug data:
 	local data = "";
 	data = data .. "Behaviour" .. " = " .. tostring(self.State.Behaviour) .. "\n";
-	for k, v in pairs(self.State.AI) do
+	data = data .. "Target" .. " = " .. tostring(self:GetTarget()) .. "\n";
+	data = data .. "---\n";
+	for k, v in pairs(self.State.Mood) do
+		if (not self.State.Mood_Avg[k]) then
+			self.State.Mood_Avg[k] = v;
+		end
+		data = data .. k .. " = " .. v .. " (" .. self.State.Mood_Avg[k] .. ")\n";
+	end
+	data = data .. "---\n";
+	for k, v in pairs(self.State.Vitality) do
 		data = data .. k .. " = " .. v .. "\n";
 	end
-	data = data .. "Target" .. " = " .. tostring(self:GetTarget()) .. "\n";
 	love.graphics.printf(data, self:GetPos().x + self.Attributes.Size + 1, self:GetPos().y + 5, 200, "left")
 	
 end
@@ -722,9 +1034,15 @@ end
 -- End Slime Metatable
 
 -- Define Slime Constructor
-local MakeSlime = function(pos, isEnemy, attributes)
+local MakeSlime = function(pos, isEnemy, aiData)
 	local t = {};
 	CopyRecur(SlimeConfig, t);
+	if (aiData) then
+		HomogenizeAI(aiData);
+		--print(aiData.Curious, aiData.Angry, aiData.Hunger);
+		CopyRecur(aiData, t.State.Mood);
+		--print(t.State.Mood.Curious, t.State.Mood.Angry, t.State.Mood.Hunger);
+	end
 	t.IsEnemy = isEnemy;
 	t.pos = pos;
 	return t;
@@ -734,181 +1052,4 @@ return function()
 	Object.Register(SlimeFactoryName, MSlime, MakeSlime);
 end
 
-
---[[
-function MSlime:GetDominantAIs()
-	local dominant = {};
-	local largest = 0;
-	for ai, percent in pairs(self.State.AI) do
-		if (percent > largest) then
-			largest = percent;
-			dominant = {ai};
-		elseif (percent == largest) then
-			table.insert(dominant, ai);
-		end
-	end
-	return dominant;
-end
-function MSlime:SelectBestBehaviour()
-	local behav = "none";
-	-- Randomly select from the list of dominant AIs (usually there should only be one).
-	local dominant = {};
-	for ai, percent in pairs(self.State.AI) do
-		table.insert(dominant, ai);
-	end
-	table.sort(dominant, function(a, b) return self.State.AI[a] > self.State.AI[b]; end);
-	while (not behav) do
-		if (#dominant < 1) then
-			-- decide whether to explore or do nothing
-			if (math.random(AI_MIN, AI_MAX) <= self.State.AI.Curiosity) then
-				behav = "explore";
-			else
-				behav = "none";
-			end
-		else
-			local chosen = 1; --math.random(1, #dominant);
-			if (dominant[chosen] == "Hunger") then
-				-- look for food in surrounding area
-				local foods = self:FindInImmediateArea("food");
-				foods = FilterTargets(foods, function(obj) return not obj.Eater; end);
-				foods = GetClosest(self, foods);
-				if (#foods > 0) then
-					-- go eat the food
-					local target = foods[math.random(1, #foods)];
-					target.Eater = self;
-					self:SetTarget(target);
-					behav = "eat";
-				else
-					table.remove(dominant, chosen);
-				end
-			elseif (dominant[chosen] == "Aggression") then
-				-- look for slimes in surrounding area
-				local enemies = self:FindInImmediateArea("slime");
-				-- filter out non-enemies
-				--enemies = FilterTargets(enemies, function(obj) return obj.IsEnemy ~= self.IsEnemy; end);
-				enemies = GetClosest(self, enemies);
-				if (#enemies > 0) then
-					-- go attack a random enemy
-					local target = enemies[math.random(1, #enemies)];
-					self:SetTarget(target);
-					behav = "attack";
-				else
-					table.remove(dominant, chosen);
-				end
-			elseif (dominant[chosen] == "Curiosity") then
-				-- look for objectives in surrounding area
-				-- otherwise, explore
-				behav = "explore";
-			end
-		end
-	end
-	self.State.Behaviour = behav;
-end]]
-
---[[function MSlime:Update(dt)
-	-- Update hunger
-	self:UpdateHunger();
-	
-	if (self.State.Health == 0) then
-		-- Kill me!
-		Object.Delete(self);
-		return;
-	end
-	
-	local target = self:GetTarget();
-	local targetPos = self:GetTargetPos();
-	
-	local sightDistSqr = math.pow(self.Attributes.Sight, 2);
-	local distToTargetSqr = self:GetPos():distanceSqr(targetPos);
-	
-	local behav = self.State.Behaviour;
-	print("Current behaviour = " .. behav .. " -- target = " .. tostring(target));
-	if (behav == "none" or behav == "explore") then
-		-- if we're exploring, choose a random direction to go in.
-		if (behav == "explore") then
-			if (not target) then
-				local pos = self:GetPos();
-				local randVec = Vector.Random(self.Attributes.Sight);
-				self:SetTarget(pos + randVec);
-				target = self:GetTarget();
-				targetPos = self:GetTargetPos();
-				print("Selected random target = " .. tostring(target));
-			end
-			if (self:GetPos() == targetPos) then
-				self.State.Behaviour = "none";
-				self:SetTarget(nil);
-			else
-				self:MoveToward(targetPos, dt);
-			end
-		end
-	
-		-- examine state vars
-		self:SelectBestBehaviour();
-		print("Selected best behaviour = " .. self.State.Behaviour);
-		
-	elseif (behav == "eat") then
-		if (not target or target:GetType() ~= "food" or distToTargetSqr > sightDistSqr) then
-			self.State.Behaviour = "none";
-			self:SetTarget(nil);
-		else
-			if (distToTargetSqr > math.pow(self.Attributes.Size + target.Size, 2)) then
-				-- Move to the food until we reach it.
-				self:MoveToward(targetPos, dt);
-			else
-				-- Eat the food.
-				if (self.Timers.Eating < 0) then
-					self.Timers.Eating = love.timer.getTime();
-					target.Eater = self;
-				end
-				local timeSpentEating = love.timer.getTime() - self.Timers.Eating;
-				if (timeSpentEating >= self.Constants.EatTime) then
-					self:Eat(target);
-					self.State.Behaviour = "none";
-					self:SetTarget(nil);
-					self.Timers.Eating = -1;
-				end
-			end
-		end
-		
-	elseif (behav == "attack") then
-		if (not target or target:GetType() ~= "slime" or target.IsEnemy == false or distToTargetSqr > sightDistSqr) then
-			self.State.Behaviour = "none";
-			self:SetTarget(nil);
-		else
-			if (100 * (self.State.Health / self.Attributes.MaxHealth) < self.State.AI.Aggression / 2) then
-				-- If lack of health outweighs aggression, flee!
-				self.State.Behaviour = "flee";
-			elseif (distToTargetSqr > math.pow(self.Attributes.Size + target.Attributes.Size, 2)) then
-				-- Give chase
-				self:MoveToward(targetPos, dt);
-				
-				-- TODO: maybe do a fancier check for whether we're bored of chasing.
-				self:SelectBestBehaviour();
-				
-			else
-				-- Attack the enemy
-				if (not self.Timers.Attacking or self.Timers.Attacking < 0) then
-					self.Timers.Attacking = love.timer.getTime();
-				end
-				local timeSinceAttack = love.timer.getTime() - self.Timers.Attacking;
-				if (timeSinceAttack >= 1) then
-					target:TakeDamage(self);
-					self.Timers.Attacking = love.timer.getTime();
-				end
-				-- If the enemy dies...
-				if (target.State.Health <= 0) then
-					self.State.Behaviour = "none";
-					self:SetTarget(nil);
-				end
-			end
-		end
-	elseif (behav == "flee") then
-		if (not target or target:GetType() ~= "slime" or target.IsEnemy == false or distToTargetSqr > sightDistSqr or target.State.Behaviour ~= "attack" or target:GetTarget() ~= self) then
-			self.State.Behaviour = "none";
-			self:SetTarget(nil);
-		else
-			self:MoveAway(targetPos, dt);
-		end
-	end
-end]]
 
