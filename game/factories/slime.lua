@@ -902,15 +902,15 @@ function MSlime:Update(dt)
 	end
 	
 	if (behav == "flee") then
-		restedMod = -2;
+		restedMod = -1;
 	elseif (behav == "fight") then
-		restedMod = -2;
+		restedMod = -1;
 	elseif (behav == "explore") then
 		restedMod = -1;
 	elseif (behav == "eat" or behav == "use") then
 		restedMod = 0;
 	elseif (behav == "rest") then
-		restedMod = 1;
+		restedMod = 3;
 	end
 	
 	-- Modify mood based on behaviour.
@@ -937,7 +937,7 @@ function MSlime:Update(dt)
 	elseif (behav == "explore") then
 		self:MoveToward(targetPos, dt);
 	elseif (behav == "eat") then
-		if (distToTargetSqr > math.pow(self.Attributes.Size + target.Size, 2)) then
+		if (distToTargetSqr > math.pow(self.Attributes.Size + target.Size*target.Scale, 2)) then
 			-- Move to the food until we reach it.
 			self:MoveToward(targetPos, dt);
 		else

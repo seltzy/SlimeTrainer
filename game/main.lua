@@ -8,13 +8,20 @@ local InitFactories = require("factories");
 -- Your Slime
 local YourSlime = nil;
 
+local buttonQuads = {};
 local function LoadAssets()
 	Asset.Add(Asset.IMAGE, "slime", "assets/graphics/SlimeSheet.png");
 	Asset.Add(Asset.IMAGE, "props", "assets/graphics/Props.png");
 	Asset.Add(Asset.IMAGE, "buttons", "assets/graphics/Pressed.png");
 	Asset.Add(Asset.IMAGE, "hud", "assets/graphics/HUD.png");
 	
-	local slimeSheet = Asset.Get(Asset.IMAGE, "slime");
+	local buttonSheet = Asset.Get(Asset.IMAGE, "buttons");
+	buttonQuads.menu = love.graphics.newQuad(0, 0, 54, 24, buttonSheet:getWidth(), buttonSheet:getHeight()); -- menu
+	buttonQuads.exit = love.graphics.newQuad(0, 25, 54, 24, buttonSheet:getWidth(), buttonSheet:getHeight());
+	buttonQuads.block = love.graphics.newQuad(55, 0, 32, 32, buttonSheet:getWidth(), buttonSheet:getHeight());
+	buttonQuads.food = love.graphics.newQuad(88, 0, 32, 32, buttonSheet:getWidth(), buttonSheet:getHeight());
+	
+	--[[local slimeSheet = Asset.Get(Asset.IMAGE, "slime");
 	local slimeBatch = love.graphics.newSpriteBatch(slimeSheet, 8);
 	local slimeSprites = {};
 	for i = 1, 8 do
@@ -30,17 +37,8 @@ local function LoadAssets()
 		table.insert(propSprites, propQuad);
 	end
 	
-	local buttonSheet = Asset.Get(Asset.IMAGE, "buttons");
 	local buttonBatch = love.graphics.newSpriteBatch(buttonSheet, 4);
-	local buttonSprites = {};
-	local buttonQuad = love.graphics.newQuad(0, 0, 54, 24, buttonSheet:getWidth(), buttonSheet:getHeight());
-	table.insert(buttonSprites, buttonQuad);
-	buttonQuad = love.graphics.newQuad(0, 25, 54, 24, buttonSheet:getWidth(), buttonSheet:getHeight());
-	table.insert(buttonSprites, buttonQuad);
-	buttonQuad = love.graphics.newQuad(55, 0, 32, 32, buttonSheet:getWidth(), buttonSheet:getHeight());
-	table.insert(buttonSprites, buttonQuad);
-	buttonQuad = love.graphics.newQuad(88, 0, 32, 32, buttonSheet:getWidth(), buttonSheet:getHeight());
-	table.insert(buttonSprites, buttonQuad);
+	local buttonSprites = {};]]
 	--[[asset.Add(asset.SOUND, "eat", "assets/eat.mp3");
 	asset.Add(asset.SOUND, "attack", "assets/attack.mp3");
 	asset.Add(asset.SOUND, "place_food", "assets/placefood.mp3");
@@ -55,8 +53,51 @@ function love.load()
 	YourSlime = Object.Fabricate("slime", Vector(love.graphics.getWidth() / 2, love.graphics.getHeight() / 2), false, nil);
 end
 
+local function mouseInBounds(x, y, w, h)
+	local mx, my = love.mouse.getPosition();
+	return (mx > x and my > y and mx < x + w and my < y + h);
+end
 function love.draw()
 	Object.DrawAll();
+	
+	love.graphics.setColor(255, 255, 255, 255);
+	
+	local hudOverlay = Asset.Get(Asset.IMAGE, "hud");
+	local widthRatio = love.graphics.getWidth()/hudOverlay:getWidth();
+	local heightRatio = love.graphics.getHeight()/hudOverlay:getHeight();
+	love.graphics.draw(hudOverlay, 0, 0, 0, widthRatio, heightRatio);
+	
+	local buttons = Asset.Get(Asset.IMAGE, "buttons");
+	-- Menu button
+	if (mouseInBounds(widthRatio * 658, heightRatio * 8, 54, 24) and love.mouse.isDown("l")) then
+		love.graphics.draw(buttons, buttonQuads.menu, widthRatio * 658, heightRatio * 8, 0, widthRatio, heightRatio);
+	end
+	-- Exit button
+	if (mouseInBounds(widthRatio * 738, heightRatio * 8, 54, 24) and love.mouse.isDown("l")) then
+		love.graphics.draw(buttons, buttonQuads.exit, widthRatio * 738, heightRatio * 8, 0, widthRatio, heightRatio);
+	end
+	-- Block button
+	if (mouseInBounds(widthRatio * 4, heightRatio * 118, 32, 32) and love.mouse.isDown("l")) then
+		love.graphics.draw(buttons, buttonQuads.block, widthRatio * 4, heightRatio * 118, 0, widthRatio, heightRatio);
+	end
+	-- Food buttons
+	if (mouseInBounds(widthRatio * 4, heightRatio * 245, 32, 32) and love.mouse.isDown("l")) then
+		love.graphics.draw(buttons, buttonQuads.food, widthRatio * 4, heightRatio * 245, 0, widthRatio, heightRatio);
+	end
+	-- 612 535, 669 535, 726 535
+	local offset = 0;
+	
+	offset = heightRatio * 59 * (1 - YourSlime:GetMoodPercent("Social"));
+	love.graphics.setColor(255, 0, 0, 255);
+	love.graphics.rectangle("fill", widthRatio * 612, heightRatio * 535 + offset, widthRatio * 23, heightRatio * 59 * YourSlime:GetMoodPercent("Social"));
+	
+	offset = heightRatio * 59 * (1 - YourSlime:GetMoodPercent("Curious"));
+	love.graphics.setColor(0, 255, 0, 255);
+	love.graphics.rectangle("fill", widthRatio * 669, heightRatio * 535 + offset, widthRatio * 23, heightRatio * 59 * YourSlime:GetMoodPercent("Curious"));
+	
+	offset = heightRatio * 59 * (1 - YourSlime:GetMoodPercent("Angry"));
+	love.graphics.setColor(0, 0, 255, 255);
+	love.graphics.rectangle("fill", widthRatio * 726, heightRatio * 535 + offset, widthRatio * 23, heightRatio * 59 * YourSlime:GetMoodPercent("Angry"));
 end
 
 function love.update(dt)
@@ -77,6 +118,7 @@ end
 
 function love.mousepressed(x, y, button)
 	if (button == "l") then
+		
 	end
 end
 
