@@ -1,4 +1,12 @@
 
+--Testing
+
+local tilesetImage
+local tileSize -- size of tiles in pixels
+local tileQuads = {} -- parts of the tileset used for different tiles
+
+--testing
+
 local Object = require("util.object");
 local Vector = require("util.vector");
 
@@ -686,7 +694,8 @@ function MSlime:Draw()
 	love.graphics.setColor(red, green, blue);
 	
 	-- Draw slime
-	love.graphics.circle("fill", self:GetPos().x, self:GetPos().y, self.Attributes.Size, 100);
+	love.graphics.draw(tilesetImage, tileQuads[0], self:GetPos().x, self:GetPos().y)
+	--love.graphics.circle("fill", self:GetPos().x, self:GetPos().y, self.Attributes.Size, 100);
 	
 	-- Draw sight radius
 	love.graphics.circle("line", self:GetPos().x, self:GetPos().y, self.Attributes.Sight, 100);
@@ -727,6 +736,19 @@ local MakeSlime = function(pos, isEnemy, attributes)
 	CopyRecur(SlimeConfig, t);
 	t.IsEnemy = isEnemy;
 	t.pos = pos;
+	
+	--testing
+
+	tilesetImage = love.graphics.newImage("assets/slime.png");
+	tilesetImage:setFilter("nearest", "linear"); -- this "linear filter" removes some artifacts if we were to scale the tiles
+	tileSize = 32;
+	tileSize = 32;
+	
+	tileQuads[0] = love.graphics.newQuad(3 * tileSize, 0 * tileSize, tileSize, tileSize,
+    tilesetImage:getWidth(), tilesetImage:getHeight())
+	
+	--end testing
+	
 	return t;
 end
 

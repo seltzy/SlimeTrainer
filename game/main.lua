@@ -9,8 +9,8 @@ local InitFactories = require("factories");
 local YourSlime = nil;
 
 local function LoadAssets()
-	--[[asset.Add(asset.IMAGE, "slime", "assets/slime.png");
-	asset.Add(asset.IMAGE, "food", "assets/food.png");
+	Asset.Add(0, "slime", "assets/slime.png");
+	--[[asset.Add(asset.IMAGE, "food", "assets/food.png");
 	asset.Add(asset.IMAGE, "block", "assets/block.png");
 	
 	asset.Add(asset.SOUND, "eat", "assets/eat.mp3");
