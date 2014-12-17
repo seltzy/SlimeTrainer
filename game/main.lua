@@ -123,12 +123,17 @@ function love.mousepressed(x, y, button)
 end
 
 function love.mousereleased(x, y, button)
-	if (button == "l") then
-		local food = Object.Fabricate("food", Vector(x, y), nil);
-	elseif (button == "r") then
-		local randAI = {Curious = math.random(0, 100), Angry = math.random(0, 100), Social = math.random(0, 100)};
-		local enemy = Object.Fabricate("slime", Vector(x, y), true, randAI);
-		enemy.Modifiers.Anger = 2;
-		--enemy:ModifyAI("Aggression", 100);
+	if (mouseInBounds(49, 49, 751, 453)) then 
+		if (button == "l") then
+			local food = Object.Fabricate("food", Vector(x, y), nil);
+		elseif (button == "r") then
+			local randAI = {Curious = math.random(0, 100), Angry = math.random(0, 100), Social = math.random(0, 100)};
+			local enemy = Object.Fabricate("slime", Vector(x, y), true, randAI);
+			enemy.Modifiers.Anger = 2;
+			--enemy:ModifyAI("Aggression", 100);
+		end
+	end
+	if (mouseInBounds(love.graphics.getWidth()/Asset.Get(Asset.IMAGE, "hud"):getWidth() * 738, love.graphics.getHeight()/Asset.Get(Asset.IMAGE, "hud"):getHeight() * 8, 54, 24)) then
+				love.event.quit();
 	end
 end

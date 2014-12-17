@@ -228,7 +228,7 @@ MSlime.Desire = {
 		-- Pick a random place to go to.
 		local target = slime:GetPos() + Vector.Random(slime.Attributes.Sight);
 		-- Don't go off the screen for now.
-		while (target.x < 0 or target.x > love.graphics.getWidth() or target.y < 0 or target.y > love.graphics.getHeight()) do
+		while (target.x < 49 or target.x > love.graphics.getWidth() or target.y < 49 or target.y > love.graphics.getHeight() - 98) do
 			target = slime:GetPos() + Vector.Random(slime.Attributes.Sight);
 		end
 		
@@ -610,10 +610,10 @@ function MSlime:MoveToward(targetPos, dt)
 	if (((targetPos - newPos):normalize() + direction):length() <= 0.1) then
 		newPos = targetPos;
 	end
-	if (newPos.x < 0 or newPos.x > love.graphics.getWidth()) then
+	if (newPos.x < 49 or newPos.x > love.graphics.getWidth()) then
 		newPos = self:GetPos() + Vector(-offset.x, 0);
 	end
-	if (newPos.y < 0 or newPos.y > love.graphics.getHeight()) then
+	if (newPos.y < 49 or newPos.y > love.graphics.getHeight() - 98) then
 		newPos = self:GetPos() + Vector(0, -offset.y);
 	end
 	-- Update position.
@@ -628,10 +628,10 @@ function MSlime:MoveAway(targetPos, dt)
 	local direction = (forward + (right * (math.random(-100, 100) / 100)):normalize()):normalize();
 	local offset = -(direction * self.Attributes.Speed * self.Constants.FleeSpeedMultiplier * dt);
 	local newPos = self:GetPos() + offset;
-	if (newPos.x < 0 or newPos.x > love.graphics.getWidth()) then
+	if (newPos.x < 49 or newPos.x > love.graphics.getWidth()) then
 		newPos = self:GetPos() + Vector(-offset.x, 0);
 	end
-	if (newPos.y < 0 or newPos.y > love.graphics.getHeight()) then
+	if (newPos.y < 49 or newPos.y > love.graphics.getHeight() - 98) then
 		newPos = self:GetPos() + Vector(0, -offset.y);
 	end
 	-- Update position.
@@ -690,7 +690,7 @@ local function GetCausedChange(keysToChange, aiData, amount)
 
 		-- ATTN: tonumber(tostring(f)) is a super-shady way of fixing rounding error, but it totally worked. #fml
 
-		-- Sanity check this shit
+		-- Sanity check
 		if (divvy ~= tonumber(tostring(math.floor(divvy)))) then
 			print("Rounding error was experienced in calculating " .. floating .. " * " .. #affectedKeys .. " : " .. divvy .. " vs " .. math.floor(divvy));
 			return false;
